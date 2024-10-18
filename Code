@@ -1,1 +1,494 @@
+import numpy as np
+import pandas as pd
+from joblib import Parallel, delayed
+import multiprocessing
+import time  
+
+
+class DecisionTreeClassifier:
+    def __init__(self, 
+                 min_samples_split=2, 
+                 max_depth=None, 
+                 criterion='gini',
+                 min_impurity_decrease=0):
+        
+        self.min_samples_split = min_samples_split
+        self.max_depth = max_depth
+        self.criterion = criterion
+        self.min_impurity_decrease = min_impurity_decrease
+        self.root = None
+        self.feature_types = None  
+        self.X = None
+        self.Y = None
+        self.sample_weight = None
+
+    def fit(self, X, Y, sample_weight=None):
+        
+        self.X = X
+        self.Y = Y
+        if sample_weight is None:
+            self.sample_weight = np.ones(len(Y), dtype=np.float32)  
+            self.sample_weight = sample_weight.astype(np.float32)
+        # Detect feature types: numerical or categorical
+        self.feature_types = self._detect_feature_types(X)
+        # Initialize tree with all indices
+        self.root = self.build_tree(np.arange(len(Y)), curr_depth=0)
+
+    def _detect_feature_types(self, X):
+        
+        feature_types = []
+        for col in range(X.shape[1]):
+            if isinstance(X[0, col], (int, float, np.integer, np.floating)):
+                feature_types.append('numerical')
+            else:
+                feature_types.append('categorical')  
+        return feature_types
+
+    def build_tree(self, indices, curr_depth=0):
+        
+        num_samples = len(indices)
+        # Early stopping if all samples belong to one class
+        unique_classes = np.unique(self.Y[indices])
+        if len(unique_classes) == 1:
+            leaf_value = unique_classes[0]
+            return {'value': leaf_value, 'is_leaf': True}
+        
+        # Check stopping criteria
+        if (num_samples < self.min_samples_split) or (self.max_depth is not None and curr_depth >= self.max_depth):
+            leaf_value = self.calculate_leaf_value(indices)
+            return {'value': leaf_value, 'is_leaf': True}
+
+        # Find the best split
+        best_split = self.get_best_split(indices)
+        if best_split["info_gain"] < self.min_impurity_decrease:
+            leaf_value = self.calculate_leaf_value(indices)
+            return {'value': leaf_value, 'is_leaf': True}
+
+        # Otherwise, create internal node
+        left_child = self.build_tree(best_split["dataset_left"], curr_depth + 1)
+        right_child = self.build_tree(best_split["dataset_right"], curr_depth + 1)
+        return {
+            'feature': best_split["feature"],
+            'threshold': best_split["threshold"],
+            'left': left_child,
+            'right': right_child,
+            'info_gain': best_split["info_gain"],
+            'is_leaf': False
+        }
+
+    def calculate_leaf_value(self, indices):
+        
+        # Calculate weighted counts for each class
+        weighted_counts = np.bincount(self.Y[indices], weights=self.sample_weight[indices], minlength=np.max(self.Y) + 1)
+        # class with the highest weighted count
+        return np.argmax(weighted_counts)
+
+    def get_best_split(self, indices):
+        
+        best_split = {"info_gain": -np.inf}
+        parent_impurity = self.calculate_impurity(indices)
+
+        for feature_index in range(self.X.shape[1]):
+            feature_type = self.feature_types[feature_index]
+            feature_values = self.X[indices, feature_index]
+
+            if feature_type == 'numerical':
+                # Handle numerical features with limited thresholds
+                unique_values = np.unique(feature_values)
+                if len(unique_values) == 1:
+                    continue  # No split possible
+
+                # Select thresholds based on percentiles to limit number of splits
+                percentiles = np.linspace(0, 100, num=10, endpoint=False)[1:]  # 9 thresholds
+                thresholds = np.percentile(feature_values, percentiles)
+
+                for threshold in thresholds:
+                    left_mask = feature_values <= threshold
+                    right_mask = feature_values > threshold
+
+                    if left_mask.sum() < self.min_samples_split or right_mask.sum() < self.min_samples_split:
+                        continue  # Skip if split doesn't satisfy min_samples_split
+
+                    left_indices = indices[left_mask]
+                    right_indices = indices[right_mask]
+
+                    # Calculate information gain
+                    info_gain = self.calculate_information_gain(indices, left_indices, right_indices)
+
+                    if info_gain > best_split["info_gain"]:
+                        best_split = {
+                            "feature": feature_index,
+                            "threshold": threshold,
+                            "info_gain": info_gain,
+                            "dataset_left": left_indices,
+                            "dataset_right": right_indices
+                        }
+
+            else:
+                # Handle categorical features
+                unique_categories = np.unique(feature_values)
+                for category in unique_categories:
+                    left_mask = feature_values == category
+                    right_mask = feature_values != category
+
+                    if left_mask.sum() < self.min_samples_split or right_mask.sum() < self.min_samples_split:
+                        continue  # Skip if split doesn't satisfy min_samples_split
+
+                    left_indices = indices[left_mask]
+                    right_indices = indices[right_mask]
+
+                    # Calculate information gain
+                    info_gain = self.calculate_information_gain(indices, left_indices, right_indices)
+
+                    if info_gain > best_split["info_gain"]:
+                        best_split = {
+                            "feature": feature_index,
+                            "threshold": category,
+                            "info_gain": info_gain,
+                            "dataset_left": left_indices,
+                            "dataset_right": right_indices
+                        }
+
+        return best_split
+
+    def calculate_information_gain(self, parent, left_child, right_child):
+        
+        parent_impurity = self.calculate_impurity(parent)
+        left_impurity = self.calculate_impurity(left_child)
+        right_impurity = self.calculate_impurity(right_child)
+
+        # Calculate the weighted impurity
+        weight_l = self.sample_weight[left_child].sum() / self.sample_weight[parent].sum()
+        weight_r = self.sample_weight[right_child].sum() / self.sample_weight[parent].sum()
+
+        if self.criterion == "gini":
+            gain = parent_impurity - (weight_l * left_impurity + weight_r * right_impurity)
+        elif self.criterion == "entropy":
+            gain = parent_impurity - (weight_l * left_impurity + weight_r * right_impurity)
+        elif self.criterion == "error":
+            gain = parent_impurity - (weight_l * left_impurity + weight_r * right_impurity)
+        else:
+            raise ValueError(f"Unknown criterion: {self.criterion}")
+
+        return gain
+
+    def calculate_impurity(self, indices):
+        
+        if self.criterion == "gini":
+            return self.gini_index(indices)
+        elif self.criterion == "entropy":
+            return self.entropy(indices)
+        elif self.criterion == "error":
+            return self.misclassification_error(indices)
+        else:
+            raise ValueError(f"Unknown criterion: {self.criterion}")
+
+    def entropy(self, indices):
+        
+        total_weight = self.sample_weight[indices].sum()
+        if total_weight == 0:
+            return 0
+        # Calculate weighted probabilities
+        probs = np.bincount(self.Y[indices], weights=self.sample_weight[indices], minlength=np.max(self.Y) + 1) / total_weight
+        probs = probs[probs > 0]  # Remove zero probabilities
+        return -np.sum(probs * np.log2(probs))
+
+    def gini_index(self, indices):
+        
+        total_weight = self.sample_weight[indices].sum()
+        if total_weight == 0:
+            return 0
+        # Calculate weighted probabilities
+        probs = np.bincount(self.Y[indices], weights=self.sample_weight[indices], minlength=np.max(self.Y) + 1) / total_weight
+        return 1.0 - np.sum(probs ** 2)
+
+    def misclassification_error(self, indices):
+        
+        total_weight = self.sample_weight[indices].sum()
+        if total_weight == 0:
+            return 0
+        # Calculate weighted probabilities
+        probs = np.bincount(self.Y[indices], weights=self.sample_weight[indices], minlength=np.max(self.Y) + 1) / total_weight
+        max_prob = probs.max()
+        return 1 - max_prob
+
+    def predict(self, X):
+        
+        return np.array([self.traverse_tree(x, self.root) for x in X])
+
+    def traverse_tree(self, x, node):
+        
+        while not node['is_leaf']:
+            feature_value = x[node['feature']]
+            if self.feature_types[node['feature']] == 'numerical':
+                if feature_value <= node['threshold']:
+                    node = node['left']
+                else:
+                    node = node['right']
+            else:
+                if feature_value == node['threshold']:
+                    node = node['left']
+                else:
+                    node = node['right']
+        return node['value']
+
+    def evaluate(self, X, Y):
+        
+        predictions = self.predict(X)  # Get predictions for the test set
+        error = np.mean(predictions != Y)  # Calculate 0-1 loss
+        return error
+
+    def training_error(self, X, Y):
+        
+        predictions = self.predict(X)
+        return np.mean(predictions != Y)  
+
+    def hyperparameter_tuning(self, X, Y, sample_weight=None):
+        
+        if sample_weight is None:
+            sample_weight = np.ones(len(Y), dtype=np.float32)
+
+        # Define a hyperparameter grid including 'error' as a criterion
+        max_depths = [10, 20]           # Depths to evaluate
+        min_samples_splits = [2, 5]    # Minimum samples to split
+        criteria = ['gini', 'entropy', 'error']  
+        hyperparams = [(criterion, max_depth, min_samples_split) 
+                       for criterion in criteria 
+                       for max_depth in max_depths 
+                       for min_samples_split in min_samples_splits]
+
+        # Function to evaluate a single hyperparameter combination
+        def evaluate_hyperparams(params):
+            criterion, max_depth, min_samples_split = params
+            clf = DecisionTreeClassifier(
+                min_samples_split=min_samples_split, 
+                max_depth=max_depth, 
+                criterion=criterion
+            )
+            cv_errors = []
+            k = 5  # 5-fold cross-validation
+            # Ensure reproducibility
+            rng = np.random.default_rng(seed=42)
+            indices = rng.permutation(len(Y))
+            folds = np.array_split(indices, k)
+
+            for i in range(k):
+                test_indices = folds[i]
+                train_indices = np.concatenate([folds[j] for j in range(k) if j != i])
+
+                X_train_cv, X_test_cv = X[train_indices], X[test_indices]
+                Y_train_cv, Y_test_cv = Y[train_indices], Y[test_indices]
+                sample_weight_train_cv = sample_weight[train_indices]
+                sample_weight_test_cv = sample_weight[test_indices]
+
+                clf.fit(X_train_cv, Y_train_cv, sample_weight_train_cv)
+                error = clf.evaluate(X_test_cv, Y_test_cv)
+                cv_errors.append(error)
+
+            avg_cv_error = np.mean(cv_errors)
+            # Calculate accuracy
+            accuracy = 1 - avg_cv_error
+
+            # Feedback
+            print(f"Trained Tree with Criterion: {criterion}, Max Depth: {max_depth}, "
+                  f"Min Samples Split: {min_samples_split} | Avg CV Accuracy: {accuracy:.4f}")
+
+            return {
+                'criterion': criterion,
+                'max_depth': max_depth,
+                'min_samples_split': min_samples_split,
+                'avg_cv_error': avg_cv_error,
+                'accuracy': accuracy
+            }
+
+        # Determine the number of workers
+        num_workers = min(multiprocessing.cpu_count(), len(hyperparams))
+
+        # Use Joblib's Parallel and delayed for parallelism
+        tuning_start_time = time.time()  # Corrected timing
+        results = Parallel(n_jobs=num_workers, backend='loky')(
+            delayed(evaluate_hyperparams)(params) for params in hyperparams
+        )
+        tuning_end_time = time.time()
+
+        print(f"\nHyperparameter tuning completed in {tuning_end_time - tuning_start_time:.2f} seconds.\n")
+
+        return results
+    
+    def print_tree(self, node=None, depth=0):
+    
+        if node is None:
+            node = self.root
+        
+        if node['is_leaf']:
+            print(f"{'  ' * depth}Leaf: Class {node['value']}")
+        else:
+            print(f"{'  ' * depth}Node: [Feature {node['feature']}, Threshold {node['threshold']}]")
+            print(f"{'  ' * depth}Left:")
+            self.print_tree(node['left'], depth + 1)
+            print(f"{'  ' * depth}Right:")
+            self.print_tree(node['right'], depth + 1)
+
+
+def compute_confusion_matrix(y_true, y_pred):
+    
+    classes = np.unique(np.concatenate((y_true, y_pred)))
+    num_classes = len(classes)
+    matrix = np.zeros((num_classes, num_classes), dtype=int)
+    for i in range(len(y_true)):
+        matrix[y_true[i], y_pred[i]] += 1
+    return matrix
+
+
+if __name__ == "__main__":
+    # Load dataset
+    file_path = r"C:\Users\melan\OneDrive - Università degli Studi di Milano\App\Allegati\MushroomDataset\secondary_data.csv"
+    df = pd.read_csv(file_path, delimiter=';')  # Check delimiter
+    print(df.head())
+    print(df.describe())
+    df.info()
+
+    # Drop columns with more than 30% missing values
+    missing_percentage = df.isnull().mean() * 100
+    columns_to_drop = missing_percentage[missing_percentage > 30].index.tolist()
+    print(missing_percentage)
+    df_reduced = df.drop(columns=columns_to_drop)
+    print(f"Columns eliminated: {columns_to_drop}")
+
+    # Drop rows with any missing values
+    df_new = df_reduced.dropna().copy()
+    print(df_new.head())
+
+    # Display dataset information
+    num_rows, num_columns = df_new.shape
+    total_data_points = df_new.size
+    print(f"Number of rows: {num_rows}")
+    print(f"Number of columns: {num_columns}")
+    print(f"Total amount of data: {total_data_points}")
+
+    # Convert target variable to numerical with integer dtype
+    df_new.loc[:, 'class'] = df_new['class'].map({'e': 0, 'p': 1}).astype(int)
+
+    # Identify feature columns excluding the target variable
+    feature_columns = df_new.columns[1:]
+
+    # Prepare features and labels
+    X = df_new.iloc[:, 1:].values  # Keep as original values (categorical features not encoded)
+    Y = df_new.iloc[:, 0].values.astype(int)         # Ensure Y is of integer type
+
+    print(df_new.head())
+
+    print("Unique values in Y:", np.unique(Y))
+
+    # Calculate class frequencies using NumPy
+    unique_classes, class_counts = np.unique(Y, return_counts=True)
+    class_freq = dict(zip(unique_classes, class_counts / len(Y)))
+
+    # Calculate class weights efficiently
+    # Assuming binary classification with classes 0 and 1
+    class_weights = {cls: 1.0 - freq for cls, freq in class_freq.items()}
+    weight_array = np.zeros(np.max(Y) + 1)
+    for cls, weight in class_weights.items():
+        weight_array[cls] = weight
+
+    # Map sample weights using NumPy's advanced indexing
+    sample_weight = weight_array[Y]
+    print("Class Frequencies:", class_freq)
+    print("Class Weights:", class_weights)
+    print("Sample Weights:", sample_weight[:10])  # Print first 10 weights
+
+    # Split data into training and test sets
+    np.random.seed(42)  # For reproducibility
+    indices = np.arange(len(Y))
+    np.random.shuffle(indices)
+
+    split_ratio = 0.8  # 80% for training, 20% for test
+    train_size = int(len(Y) * split_ratio)
+
+    train_indices = indices[:train_size]
+    test_indices = indices[train_size:]
+
+    X_train, X_test = X[train_indices], X[test_indices]
+    Y_train, Y_test = Y[train_indices], Y[test_indices]
+    sample_weight_train = sample_weight[train_indices]
+    sample_weight_test = sample_weight[test_indices]
+
+    # Create classifier
+    dt_classifier = DecisionTreeClassifier()
+
+    # Hyperparameter tuning on training set
+    print("\nStarting hyperparameter tuning...")
+    tuning_results = dt_classifier.hyperparameter_tuning(X_train, Y_train, sample_weight_train)
+
+    # Find the best parameters (lowest avg_cv_error)
+    best_result = min(tuning_results, key=lambda x: x['avg_cv_error'])  # x['avg_cv_error'] is avg_cv_error
+
+    best_criterion = best_result['criterion']
+    best_max_depth = best_result['max_depth']
+    best_min_samples_split = best_result['min_samples_split']
+    best_avg_cv_error = best_result['avg_cv_error']
+    best_accuracy = best_result['accuracy']
+
+    # Print hyperparameter tuning results
+    print("\nHyperparameter tuning results:")
+    for result in tuning_results:
+        print(f"Criterion: {result['criterion']}, Max Depth: {result['max_depth']}, "
+              f"Min Samples Split: {result['min_samples_split']}, "
+              f"Avg CV Error: {result['avg_cv_error']:.4f}, "
+              f"Avg CV Accuracy: {result['accuracy']:.4f}")
+
+    # Print best parameters
+    print(f"\nBest parameters:")
+    print(f"Criterion: {best_criterion}, Max Depth: {best_max_depth}, "
+          f"Min Samples Split: {best_min_samples_split}, Avg CV Error: {best_avg_cv_error:.4f}, "
+          f"Avg CV Accuracy: {best_accuracy:.4f}")
+
+    # Retrain the model on the entire training set with the best parameters
+    print("\nRetraining the model with the best hyperparameters on the entire training set...")
+    dt_classifier = DecisionTreeClassifier(
+        min_samples_split=best_min_samples_split, 
+        max_depth=best_max_depth, 
+        criterion=best_criterion
+    )
+    dt_classifier.fit(X_train, Y_train, sample_weight_train)
+
+    # Evaluate on training set
+    train_error = dt_classifier.evaluate(X_train, Y_train)
+    train_accuracy = 1 - train_error
+    print(f"\nTraining Error: {train_error:.4f}")
+    print(f"Training Accuracy: {train_accuracy:.4f}")
+
+    # Predict on test set
+    test_error = dt_classifier.evaluate(X_test, Y_test)
+    test_accuracy = 1 - test_error
+    print(f"\nTest Error: {test_error:.4f}")
+    print(f"Test Accuracy: {test_accuracy:.4f}")
+
+    # Generate predictions
+    Y_train_pred = dt_classifier.predict(X_train)
+    Y_test_pred = dt_classifier.predict(X_test)
+
+    # Compute confusion matrices
+    train_conf_matrix = compute_confusion_matrix(Y_train, Y_train_pred)
+    test_conf_matrix = compute_confusion_matrix(Y_test, Y_test_pred)
+
+    # Print confusion matrices
+    print("\nConfusion Matrix for Training Set:")
+    print(train_conf_matrix)
+
+    print("\nConfusion Matrix for Test Set:")
+    print(test_conf_matrix)
+
+# After retraining the model with the best hyperparameters
+print("\nRetraining the model with the best hyperparameters on the entire training set...")
+dt_classifier = DecisionTreeClassifier(
+    min_samples_split=best_min_samples_split, 
+    max_depth=best_max_depth, 
+    criterion=best_criterion
+)
+dt_classifier.fit(X_train, Y_train, sample_weight_train)
+
+#Print the tree structure
+print("\nDecision Tree Structure:")
+dt_classifier.print_tree() 
 
