@@ -27,7 +27,8 @@ class DecisionTreeClassifier:
         self.X = X
         self.Y = Y
         if sample_weight is None:
-            self.sample_weight = np.ones(len(Y), dtype=np.float32)  
+            self.sample_weight = np.ones(len(Y), dtype=np.float32)  # Default to equal weights
+        else:
             self.sample_weight = sample_weight.astype(np.float32)
         # Detect feature types: numerical or categorical
         self.feature_types = self._detect_feature_types(X)
@@ -41,13 +42,13 @@ class DecisionTreeClassifier:
             if isinstance(X[0, col], (int, float, np.integer, np.floating)):
                 feature_types.append('numerical')
             else:
-                feature_types.append('categorical')  
+                feature_types.append('categorical')  # Default to categorical
         return feature_types
 
     def build_tree(self, indices, curr_depth=0):
         
         num_samples = len(indices)
-        # Early stopping if all samples belong to one class
+        # stopping if all samples belong to one class
         unique_classes = np.unique(self.Y[indices])
         if len(unique_classes) == 1:
             leaf_value = unique_classes[0]
@@ -80,7 +81,7 @@ class DecisionTreeClassifier:
         
         # Calculate weighted counts for each class
         weighted_counts = np.bincount(self.Y[indices], weights=self.sample_weight[indices], minlength=np.max(self.Y) + 1)
-        # class with the highest weighted count
+        # Return the class with the highest weighted count
         return np.argmax(weighted_counts)
 
     def get_best_split(self, indices):
@@ -241,16 +242,16 @@ class DecisionTreeClassifier:
     def training_error(self, X, Y):
         
         predictions = self.predict(X)
-        return np.mean(predictions != Y)  
+        return np.mean(predictions != Y)  # 0-1 loss
 
     def hyperparameter_tuning(self, X, Y, sample_weight=None):
         
         if sample_weight is None:
             sample_weight = np.ones(len(Y), dtype=np.float32)
 
-        # Define a hyperparameter grid including 'error' as a criterion
-        max_depths = [10, 20]           # Depths to evaluate
-        min_samples_splits = [2, 5]    # Minimum samples to split
+        # Define a hyperparameter grid 
+        max_depths = [10, 20]           
+        min_samples_splits = [2, 5]   
         criteria = ['gini', 'entropy', 'error']  
         hyperparams = [(criterion, max_depth, min_samples_split) 
                        for criterion in criteria 
@@ -490,5 +491,4 @@ dt_classifier.fit(X_train, Y_train, sample_weight_train)
 
 #Print the tree structure
 print("\nDecision Tree Structure:")
-dt_classifier.print_tree() 
-
+dt_classifier.print_tree()  
